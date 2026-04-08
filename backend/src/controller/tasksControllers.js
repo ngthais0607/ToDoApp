@@ -1,13 +1,17 @@
 import Task from "../models/Task.js";
+import { parseDSL, PRIORITY_ORDER } from "../dsl/index.js";
 
+// ─────────────────────────────────────────────
+// GET /api/tasks?filter=today&sort=priority
+// ─────────────────────────────────────────────
 export const getAllTasks = async (req, res) => {
-  const { filter = "today" } = req.query;
+  const { filter = "today", sort = "createdAt" } = req.query;
   const now = new Date();
   let startDate;
 
   switch (filter) {
     case "today": {
-      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // 2025-08-24 00:00
+      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       break;
     }
     case "week": {
@@ -26,23 +30,81 @@ export const getAllTasks = async (req, res) => {
     }
   }
 
-  const query = startDate ? { createdAt: { $gte: startDate } } : {};
+  const matchQuery = startDate ? { createdAt: { $gte: startDate } } : {};
+
+  // Shared helper fields used by multiple sort modes
+  const priorityField = {
+    $addFields: {
+      _priorityOrder: {
+        $switch: {
+          branches: [
+            { case: { $eq: ["$priority", "urgent"] }, then: 4 },
+            { case: { $eq: ["$priority", "high"] },   then: 3 },
+            { case: { $eq: ["$priority", "medium"] }, then: 2 },
+            { case: { $eq: ["$priority", "low"] },    then: 1 },
+          ],
+          default: 0,
+        },
+      },
+    },
+  };
+
+  const dueDateField = {
+    $addFields: {
+      _dueDateSort: {
+        $cond: {
+          if: { $eq: ["$dueDate", null] },
+          then: new Date("9999-12-31"),
+          else: "$dueDate",
+        },
+      },
+    },
+  };
+
+  let tasksSortStage;
+  if (sort === "smart") {
+    // Smart sort: priority DESC → nearest deadline first (nulls last) → newest first
+    tasksSortStage = [
+      priorityField,
+      dueDateField,
+      { $sort: { _priorityOrder: -1, _dueDateSort: 1, createdAt: -1 } },
+    ];
+  } else if (sort === "priority") {
+    tasksSortStage = [
+      priorityField,
+      { $sort: { _priorityOrder: -1, createdAt: -1 } },
+    ];
+  } else if (sort === "dueDate") {
+    tasksSortStage = [
+      dueDateField,
+      { $sort: { _dueDateSort: 1, createdAt: -1 } },
+    ];
+  } else {
+    // default: newest first
+    tasksSortStage = [{ $sort: { createdAt: -1 } }];
+  }
 
   try {
     const result = await Task.aggregate([
-      { $match: query },
+      { $match: matchQuery },
       {
         $facet: {
-          tasks: [{ $sort: { createdAt: -1 } }],
-          activeCount: [{ $match: { status: "active" } }, { $count: "count" }],
-          completeCount: [{ $match: { status: "complete" } }, { $count: "count" }],
+          tasks: tasksSortStage,
+          activeCount: [
+            { $match: { status: "active" } },
+            { $count: "count" },
+          ],
+          completeCount: [
+            { $match: { status: "completed" } },
+            { $count: "count" },
+          ],
         },
       },
     ]);
 
-    const tasks = result[0].tasks;
-    const activeCount = result[0].activeCount[0]?.count || 0;
-    const completeCount = result[0].completeCount[0]?.count || 0;
+    const tasks        = result[0].tasks;
+    const activeCount  = result[0].activeCount[0]?.count  || 0;
+    const completeCount= result[0].completeCount[0]?.count || 0;
 
     res.status(200).json({ tasks, activeCount, completeCount });
   } catch (error) {
@@ -51,11 +113,55 @@ export const getAllTasks = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────
+// POST /api/tasks/parse  (preview only, no DB)
+// ─────────────────────────────────────────────
+export const parseTaskDSL = (req, res) => {
+  const { dsl } = req.body;
+  if (typeof dsl !== "string" || !dsl.trim()) {
+    return res.status(400).json({ message: "Field 'dsl' is required" });
+  }
+
+  const result = parseDSL(dsl.trim());
+  if (!result.ok) {
+    return res.status(422).json({
+      message: result.error,
+      phase:   result.phase,
+    });
+  }
+
+  // Return the parsed task preview (dueDate as ISO string for JSON)
+  res.status(200).json({ task: result.task });
+};
+
+// ─────────────────────────────────────────────
+// POST /api/tasks
+// Accepts: { dsl } OR { title, priority?, dueDate?, tags? }
+// ─────────────────────────────────────────────
 export const createTask = async (req, res) => {
   try {
-    const { title } = req.body;
-    const task = new Task({ title });
+    let taskData;
 
+    if (req.body.dsl) {
+      // ── DSL mode: parse the input string ─────────────────────────
+      const result = parseDSL(req.body.dsl.trim());
+      if (!result.ok) {
+        return res.status(422).json({
+          message: result.error,
+          phase:   result.phase,
+        });
+      }
+      taskData = result.task;
+    } else {
+      // ── Simple mode: plain fields ─────────────────────────────────
+      const { title, priority = "medium", dueDate = null, tags = [] } = req.body;
+      if (!title?.trim()) {
+        return res.status(400).json({ message: "Field 'title' is required" });
+      }
+      taskData = { title: title.trim(), priority, dueDate, tags };
+    }
+
+    const task    = new Task(taskData);
     const newTask = await task.save();
     res.status(201).json(newTask);
   } catch (error) {
@@ -64,16 +170,15 @@ export const createTask = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────
+// PUT /api/tasks/:id
+// ─────────────────────────────────────────────
 export const updateTask = async (req, res) => {
   try {
-    const { title, status, completedAt } = req.body;
+    const { title, status, completedAt, priority, dueDate, tags } = req.body;
     const updatedTask = await Task.findByIdAndUpdate(
       req.params.id,
-      {
-        title,
-        status,
-        completedAt,
-      },
+      { title, status, completedAt, priority, dueDate, tags },
       { new: true }
     );
 
@@ -88,15 +193,18 @@ export const updateTask = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────
+// DELETE /api/tasks/:id
+// ─────────────────────────────────────────────
 export const deleteTask = async (req, res) => {
   try {
-    const deleteTask = await Task.findByIdAndDelete(req.params.id);
+    const deletedTask = await Task.findByIdAndDelete(req.params.id);
 
-    if (!deleteTask) {
+    if (!deletedTask) {
       return res.status(404).json({ message: "Task does not exist" });
     }
 
-    res.status(200).json(deleteTask);
+    res.status(200).json(deletedTask);
   } catch (error) {
     console.error("Error when calling deleteTask", error);
     res.status(500).json({ message: "Internal server error" });

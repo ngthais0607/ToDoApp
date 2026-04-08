@@ -16,6 +16,20 @@ const taskSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // ── DSL fields ──────────────────────────────────────────────────
+    priority: {
+      type: String,
+      enum: ["low", "medium", "high", "urgent"],
+      default: "medium",
+    },
+    dueDate: {
+      type: Date,
+      default: null,
+    },
+    tags: {
+      type: [String],
+      default: [],
+    },
   },
   { timestamps: true },
 );
