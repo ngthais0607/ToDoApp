@@ -98,10 +98,10 @@ const AddTask = ({ handleNewTaskAdded }) => {
                 <HelpCircle className="size-3.5 text-primary" /> DSL syntax
               </p>
               <div className="font-mono text-foreground/70 leading-relaxed">
-                <span className="text-foreground">Buy groceries</span>{" "}
+                <span className="text-foreground">Finish assignment</span>{" "}
                 <span className="text-orange-500">@high</span>{" "}
                 <span className="text-blue-500">in 3d</span>{" "}
-                <span className="text-green-600">#personal</span>
+                <span className="text-violet-600">#school</span>
               </div>
               <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-muted-foreground pt-0.5">
                 <span><span className="text-orange-500 font-mono">@priority</span> — low · medium · high · urgent</span>
